@@ -1,10 +1,9 @@
-from functools import wraps, singledispatchmethod
-import getopt as go
+from functools import wraps
 import re
-from re import RegexFlag, Pattern
 import sys, os
-from inspect import signature, Parameter, _empty
-from typing import Callable, Optional
+from typing import Optional, Union, Tuple
+from inspect import signature, Signature, Parameter, BoundArguments, _empty
+from collections import namedtuple
 
 
 """ This module provides a decorator that translates type hints and a formatted docstring into
@@ -12,204 +11,158 @@ from typing import Callable, Optional
     (though less powerful) alternative to the argparse module.
 """
 
-# Global constants
-EMPTY = _empty
-ARGDOC_PAT = re.compile(r"(\w+): (.+[!.?]\n?)")  # This regular expression helps extract parts of the docstring to use in
-                                                 # the cli help message.
+# Convenience bindings for argument kinds
+POS_ARG = Parameter.POSITIONAL_ONLY
+KW_ARG = Parameter.KEYWORD_ONLY
+POS_OR_KW_ARG = Parameter.POSITIONAL_OR_KEYWORD
+POS_VARG = Parameter.VAR_POSITIONAL
+KW_VARG = Parameter.VAR_KEYWORD
+Empty = _empty
 
 
-def cliargdocs(doc: str) -> str:
-    """ Get the section of the docstring corresponding to arguments.
-        return it to process and use in a command line help string.
+# Helpers for working with parameters and signatures
+def required(p: Parameter) -> bool:
+    """ Test whether the parameter has a default value.
     """
-
-    try:
-        start = doc.index("Args:") + 5
-        end = doc.index("\n\n")
-
-        return doc[start:end]
-
-    except ValueError:
-        return ""
+    return p.default is Empty
 
 
-def pstocls(p: str) -> str:
-    """ Convert a string from Python style (words separated by '_')
-        to cli style (words separated by '-').
+#  Helpers for working with function signatures
+def argco(s: Signature) -> int:
+    """ Return the length of the parameters dict.
     """
-    return p.replace("_", "-")
+    return len(s.parameters)
 
 
-def hdoc(w: int) -> str:
-    """ Produce documentation for the '-h'/'--help' command.
+def posargco(s: Signature) -> int:
+    """ Return the number of parameters in dict whose
+        kind is positional only.
     """
-    hcommand = "-h, --help".rjust(w)
-    hmsg = "view this help message.\n"
-
-    return f"    {hcommand} : {hmsg}"
+    return sum(p.kind == POS_ARG for p in s.parameters)
 
 
-def parseargdocs(argdoc: str) -> list:
-    """ Convert a blob of argument documentation into a list of command line documentation.
+def kwargco(s: Signature) -> int:
+    """ Return the number of parameters in dict whose
+        kind is keyword only.
     """
-
-    matches = []
-
-    for m in re.finditer(ARGDOC_PAT, argdoc):
-        matches.append(m.groups())
-
-    else:
-        matches[-1] += "\n\n"
-
-        return matches
+    return sum(p.kind == KW_ARG for p in s.parameters)
 
 
-def formatargdocs(argdoc: list) -> str:
-    """ Produce a final formatted string for use in command line documentation.
+def kwposargco(s: Signature) -> int:
+    """ Return the number of parameters in dict whose
+        kind is keyword or positional only.
     """
-    argdoc = argdoc[:]  # make a copy in case we want to use this elsewhere
-    width = max(len(m[0]) for m in list) + 6  # get the width of the longest argument name
-                                              # for formatting.
-
-    for i, m in argdoc:
-        a, h = m
-        asx = f"-{a[0]}, --{pstocls(a)}"
-        argdoc[i] = f"    {asx:{width}} : {h}"
-
-    return "Optional Arguments:\n\n" + hdoc(width) + "".join(argdoc)
+    return sum(p.kind == POS_OR_KW_ARG for p in s.parameters)
 
 
-def pytocli(p: str, required: bool) -> tuple:
-    """ Convert parameter from Python style (words separated by '_')
-        to cli style (words separated by '-').
+ArgcoSpec = namedtuple("ArgcoSpec", ["pos", "kw", "pos_kw", "var_pos", "var_kw"])
+
+
+def argcospec(s: Signature) -> ArgcoSpec:
+    """ Return a full description of the argument counts for the given signature.
     """
-    sopt = f"{p[0]}{':' if required else ''}"
-    lopt = f"{p.replace('_', '-')}{'=' if required else ''}"
+    acd = [0] * 5
+    
+    for p in s.parameters.values:
+        if (k := pspec.kind) == POS_ARG:
+            acd[0] += 1
 
-    return sopt, lopt
+        elif k == KW_ARG:
+            acd[1] += 1
 
+        elif k == POS_OR_KW_ARG:
+            acd[2] += 1
 
-class PyCLIParameter(Parameter):
-    """ This extension to the inspect.Parameter class holds a string matching
-    the cli form of an argument.
-    """
-    empty = EMPTY
-    POSITIONAL_ONLY = Parameter.POSITIONAL_ONLY
-    POSITIONAL_OR_KEYWORD = Parameter.POSITIONAL_ONLY
-    VAR_POSITIONAL = Parameter.VAR_POSITIONAL
-    KEYWORD_ONLY = Parameter.KEYWORD_ONLY
-    VAR_KEYWORD = Parameter.VAR_KEYWORD
-
-    @singledispatchmethod
-    def __init__(self, name: str, kind, *, default=EMPTY, annotation=EMPTY):
-        """ Default constructor passes all arguments to super constructor
-            and then finds the cli-name(s) that matches this argument,
-            storing these in shortopt and longopt.
-        """
-        super().__init__(name, kind, default, annotation)
-
-        if kind not in self.VAR_ARGS:
-            so, lo = pytocli(self.name, default is EMPTY)
+        elif k == VAR_POS:
+            acd[3] += 1
 
         else:
-            so, lo = None, None
+            acd[4] += 1
 
-        self.shortopt = so
-        self.longopt = lo
-
-    @__init__.register
-    def _(self, p: Parameter):
-        """ Pass the attributes of p to the default constructor.
-        """
-        self.__init__(p.name, p.kind, default=p.default, annotation=p.annotation)
-
-    @property
-    def annotation_name(self):
-        """ Simple helper for getting the name of the class of the annotation.
-        """
-        return '' if self.annotation is EMPTY else self.annotation.__name__
-
-    def __str__(self):
-        """ Patterned after str(Parameter), but includes the cli string.
-        """
-        fmt = """<PyCLIParameter "{}{}{}{}">""".format
-        n = self.name
-        t = '' if self.annotation is EMPTY else f" : {self.annotation_name}"
-        d = '' if self.default is EMPTY else f" = {self.default}"
-        c = '' if not self.shortopt else f" ({self.shortopt}, {self.longopt})"
-
-        return fmt(n, t, d, c)
+    return ArgcoSpec._make(acd)
 
 
-class CLIArgs(dict):
-    """This dict subclass holds the PyCLIParameters for a function."""
-    __slots__ = ()
-
-    def __init__(self, func: Callable):
-        """ Call this directly on a callable; add keys to self in the order they
-            appear in the Signature.parameters mappingproxy.
-        """
-        try:
-            parms = signature(func).parameters
-
-            for k in parms:
-                self[k] = PyCLIParameter(parms[k])
-
-        except (TypeError, ValueError):
-            raise NotImplementedError
-
-    @property
-    def orderedargs(self):
-        """ Return an iterator over the keys in self whose kind is not
-            KEYWORD_ONLY or VAR_KEYWORD. Each item in the iterator returns the 
-            argcount.
-        """
-        def generator(d):
-            for k in d:
-                arg = d[k]
-
-                if arg.kind == arg.POSITIONAL_ONLY or arg.kind == arg.VAR_POSITIONAL:
-                    yield k
-
-        return enumerate(generator(self), start=1)
-
-    @property
-    def shortoptstr(self):
-        """ Return a string of all the short options, suitable for use in getopt.
-        """
-        return "".join(p.shortopt for p in self.values())
-
-    @property
-    def longoptlist(self):
-        """ Return a list of the long options, suitable for use in getopt."""
-
-    def __str__(self):
-        """ String method displays type."""
-        pairs = []
-
-        for k in self:
-            pairs.append(f"[{k}, {self[k]}]")
-
-        return f"CLIArgs({', '.join(pairs)})"
+# Parsing helpers
+shortopt = re.compile(r"^-([a-zA-Z])")
+longopt = re.compile(r"^--([a-zA-Z][-a-zA-Z]+)")
+longarg = re.compile(r"^--([a-zA-Z][-a-zA-Z]+)=(.+)")
 
 
-def makeusage(args: CLIArgs) -> Callable:
-    """ Create and return a function to describe correct usage
-        of the application to the user.
+def parseopt(opt: str) -> tuple:
+    """ Try to parse the string using the shortopt, longopt, and longarg regular expressions.
+        if a pattern matches, return a tuple of all match groups with the argument or flag 
+        transformed from CLI to Python style. Otherwise, return a tuple whose first element is
+        the empty string and whose second element is the unchanged option.
+        
     """
+    if (m := shortopt.match(opt) or longopt.fullmatch(op)):
+        arg = m[1]
+
+        return arg.replace("-", "_"), True  # Interpret flags as booleans
+
+    elif (m := longarg.match(opt)):
+        arg, argv = m.groups()
+
+        return arg.replace("-", "_"), argv
+    
+    return "", opt
+
+
+# Exception classes
+class UnknownOptionError(RuntimeError):
+    pass
+
+class UnknownFlagError(RuntimeError):
+    pass
+
+class CLIArityError(RuntimeError):
     pass
 
 
-def cliparse(params: CLIArgs):
-    pass
+
+
+
+def parseargv(s: Signature) -> Tuple[tuple, dict]:
+    """ Do an initial parse of the command line arguments, attempting
+        to return a tuple and a dict that can be used with Signature.bind.
+        Raise an error if the command line arguments can't be interpreted in a way
+        consistent with the function signature.
+    """
+    sys_argv = sys.argv[1:]
+    fun_args = dict(s.parameters)
+    pos, kw, pos_kw, var_pos, var_kw = argcospec(s)
+    bound_pos = []
+    bound_vpos = []
+    bound_kw = {}
+    bound_vkw = {}
+
+
+    for arg, argv in map(parseopt, argv):
+        if arg == "":  # Failed to match a flag, try to interpret it as a positional argument
+            if pos:    # If positional arguments haven't been used up
+                bound_pos.append(argv)
+                pos -= 1
+
+            elif var_pos:
+                bound_vpos.append(argv)
+
+            else:
+                raise CLIArityError("Too many arguments supplied.")
+
+        elif len(arg) == 1:
+            pass
+
+        else:
+            pass
+            
 
 
 def microcli(app):
-    docs = ""
     @wraps(app)
     def inner(*args, **kwargs):
+        cliargs = sys.argv[1:]
         if "-h" in args or "--help" in args:
-            print(docs)
+            print(app.__doc__)
             exit(0)
 
         else:
