@@ -4,9 +4,10 @@
 
 
 from inspect import CO_VARARGS, CO_VARKEYWORDS
-from typing import Callable, Union, Any
+from typing import Callable, Union, Any, Generator
 from util import Void
 from enum import Flag, auto
+from functools import singledispatch
 
 
 class ArgKind(Flag):
@@ -201,6 +202,7 @@ def argdefaults(fun: Callable) -> dict:
 def getfullargspec(fun: Callable) -> dict:
     # Return a dictionary containing a full argument spec for fun - names,
     # kinds, types, return type, and defaults
+    # TODO: Make this a class.
     output = {}
 
     output["names"] = vfunargs(fun)
@@ -213,19 +215,31 @@ def getfullargspec(fun: Callable) -> dict:
     output["kwxargco"] = kwxargco(fun)
     output["hasvargs"] = hasvargs(fun)
     output["hasvarkw"] = hasvarkw(fun)
+    output["posxnames"] = posxargs(fun)
+    output["kwxnames"] = kwxargs(fun)
+    output["ambnames"] = ambargs(fun)
 
     return output
 
 
-def makeargtemplate(fun: Callable, argspec=False, /) -> tuple:
-    # Return a template for this function for processes that want
-    # to call the function to attempt to fill in with actual values.
-    # if argspec is True, include an argspec in the return tuple
-    positionals = []
-    kwargs = {}
-    defaults = argdefaults(fun)
+def iterargspec(specsrc: Union[Callable, dict]) -> Generator[tuple, None, None]:
+    """ Return a generator that yields tuples with a complete 
+        spec for each argument in turn.
+    """
+    argspec = specsrc if isinstance(specsrc, dict) else getfullargspec(specsrc)
 
-    if argspec:
-        return positionals, kwargs, defaults, getfullargspec(fun)
+    defaults = argspec["defaults"]
+    kinds = argspec["kinds"]
+    argtypes = argspec["types"]
 
-    return positionals, kwargs, defaults
+    for i, name in enumerate(argspec["names"]):
+        kind = kinds[i]
+        if kind not in {VarKw, Varg}:
+            default = defaults[name]
+            argtype = argtypes[name]
+
+        else:
+            default = Nil
+            argtype = Nil
+
+        yield (name, i, default, kind, argtype)

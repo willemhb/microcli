@@ -14,13 +14,49 @@ def microcli(app):
         and attempt to match them to arguments in the wrapped function using its
         argspec.
     """
-    ARGSPEC = mui.getargspec(app)
 
     @wraps(app)
-    def inner(*args, **kwargs):
-        template = {**ARGSPEC["defaults"]}
-        args = cli_p.parseargs(sys.argv)
+    def wrapper(argv):
+        """ sys.argv should be passed to this wrapper directly. It will handle removing
+            the script name from sys.argv.
+        """
+        argl = argv[1:]
 
-        positionals, 
+        if "-h" in argl or "--help" in argl:
+            print(app.__doc__)
+            quit(0)
 
-    return inner
+        debug = "-d" in argl or "--debug" in argl
+        argspec = mui.getfullargspec(app)
+        pos, opt = cli_p.parseargs(argl)
+
+        if debug:
+            print("Initial parse successful.")
+            print(f"Parsed positional arguments: {pos}")
+            print(f"Parsed options: {opt}")
+            print(f"argspec: {argspec}")
+
+        m_pos, m_opt = cli_p.matchargs(pos, opt, argspec)
+
+        if m_pos is None:
+            if debug:
+                print(f"Match error: {m_opt}")
+                exit(1)
+
+        if debug:
+            print("Secondary parse successful.")
+            print(f"Matched positional arguments: {m_pos}")
+            print(f"Matched options: {m_opt}")
+
+        try:
+            return app(*m_pos, **m_opt)
+
+        except Exception as e:
+            if debug:
+                raise e
+
+            else:
+                print("Fatal exception.")
+                exit(1)
+
+    return wrapper
