@@ -6,7 +6,7 @@ import sys, os
 def main(in_file, out_file, /, *flags, create_new=False, **options):
     """
     Read the contents of an input file and write to another file, adding
-    '3==D~' to the end of each line.
+    ':)' to the end of each line.
 
     Args:
         in_file: Name of the source file.
@@ -18,7 +18,7 @@ def main(in_file, out_file, /, *flags, create_new=False, **options):
     with open(in_file) as i_f:
         with open(out_file, mode) as o_f:
             for line in i_f:
-                o_f.write(f"{line.strip()} 3==D~\n")
+                o_f.write(f"{line.strip()} :)\n")
 
 
 if __name__ == "__main__":
